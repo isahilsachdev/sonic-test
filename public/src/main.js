@@ -8,6 +8,7 @@ const socket = io();
 const startButton = document.getElementById('start');
 const stopButton = document.getElementById('stop');
 const statusElement = document.getElementById('status');
+const sessionIdElement = document.getElementById('session-id');
 const chatContainer = document.getElementById('chat-container');
 const reinitButton = document.getElementById('reinitialize');
 const reinitTimeDisplay = document.getElementById('reinit-time');
@@ -91,12 +92,9 @@ async function initializeSession() {
         // Wait for the system prompt to be processed
         // await new Promise(resolve => setTimeout(resolve, 300));
         
-        // Resume the conversation if needed
-        console.log("Sending conversationResumption");
-        socket.emit('conversationResumption');
-        
-        // Wait for conversation history to be processed
-        // await new Promise(resolve => setTimeout(resolve, 300));
+        // Send conversation history with conversationResumption
+        console.log("Sending conversationResumption with history");
+        socket.emit('conversationResumption', chat.history);
         
         console.log("Sending audioStart");
         socket.emit('audioStart');
@@ -491,6 +489,12 @@ socket.on('streamComplete', () => {
     statusElement.className = "ready";
 });
 
+// Handle session ID updates
+socket.on('sessionId', (data) => {
+    console.log('Session ID updated:', data.sessionId);
+    sessionIdElement.textContent = data.sessionId;
+});
+
 // Handle connection status updates
 socket.on('connect', async () => {
     statusElement.textContent = "Connected to server, initializing...";
@@ -570,14 +574,12 @@ socket.on('connect', async () => {
 socket.on('disconnect', () => {
     statusElement.textContent = "Disconnected from server";
     statusElement.className = "disconnected";
+    sessionIdElement.textContent = "-";
     startButton.disabled = true;
     stopButton.disabled = true;
     sessionInitialized = false;
     hideUserThinkingIndicator();
     hideAssistantThinkingIndicator();
-    
-    // Don't disable the reinitialize button during a disconnect
-    // Since we're using disconnection as part of our reinitialization flow
 });
 
 // Handle errors
@@ -623,14 +625,8 @@ async function reinitializeSession() {
     // Stop audio player
     audioPlayer.stop();
     
-    // Clear chat history
-    // chatHistoryManager.clearHistory();
-    // updateChatUI();
-    
     // Track start time
     const startTime = Date.now();
-    
-    // Store the start time in a global variable to calculate duration after reconnect
     window.reconnectStartTime = startTime;
     
     // Display the button as disabled during reinitialization
@@ -639,19 +635,55 @@ async function reinitializeSession() {
     try {
         // First step: Send stopAudio to properly clean up any active audio
         console.log("Sending stopAudio to clean up active streams");
-        socket.emit('stopAudio');
+        // socket.emit('stopAudio');
         
-        // Give the server time to process the stopAudio command
-        // Disconnect the socket
-        console.log("Disconnecting socket");
-        socket.disconnect();
+        // Wait for cleanup
+        await new Promise(resolve => setTimeout(resolve, 500));
         
-        // Wait longer to ensure proper cleanup on the server side
-        // This is crucial to avoid "duplicate prompt" errors
-        console.log("Waiting for server cleanup...");        
-        // Reconnect
-        console.log("Reconnecting after disconnect...");
-        socket.connect();
+        // Request session reinitialization (LLM session only)
+        console.log("Requesting LLM session reinitialization");
+        socket.emit('reinitializeSession');
+        
+        // Wait for reinitialization to complete
+        await new Promise((resolve) => {
+            socket.once('sessionReinitialized', (data) => {
+                console.log("LLM session reinitialized with new ID:", data.newSessionId);                
+                resolve();
+            });
+        });
+        
+        // Wait a moment for the server to set up the new session
+        // await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Re-send system prompt and chat history, then continue as normal
+        console.log("Sending promptStart");
+        socket.emit('promptStart');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        console.log("Sending systemPrompt");
+        socket.emit('systemPrompt');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        console.log("Sending conversationResumption with history");
+        socket.emit('conversationResumption', chat.history);
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        console.log("Sending audioStart");
+        socket.emit('audioStart');
+
+        sessionInitialized = true;
+        
+        // Calculate and display reinitialization time
+        const reconnectTime = Date.now() - startTime;
+        reinitTimeDisplay.textContent = `Reinitialization took ${reconnectTime}ms`;
+        reinitButton.disabled = false;
+        window.reconnectStartTime = null;
+        
+        // Auto-start streaming
+        console.log("Auto-starting streaming after reinitialization");
+        await audioPlayer.start();
+        await startStreaming();
+        
     } catch (error) {
         console.error("Error during reinitialization:", error);
         statusElement.textContent = "Error reinitializing session, please try again";

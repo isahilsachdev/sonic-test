@@ -10,14 +10,17 @@
 
 <body>
     <div id="app">
-        <div id="status" class="disconnected">Disconnected</div>
-        <div id="chat-container"></div>
-        <div id="controls">
-            <button id="start" class="button">Start Streaming</button>
-            <button id="stop" class="button" disabled>Stop Streaming</button>
-            <button id="reinitialize" class="button">Reinitialize Session</button>
-            <span id="reinit-time"></span>
+        <div class="controls">
+            <button id="start" disabled>Start</button>
+            <button id="stop" disabled>Stop</button>
+            <button id="reinitialize">Reinitialize</button>
+            <div id="reinit-time"></div>
         </div>
+        <div class="session-info">
+            <div>Session ID: <span id="session-id">-</span></div>
+            <div>Status: <span id="status">Disconnected</span></div>
+        </div>
+        <div id="chat-container"></div>
     </div>
     <script type="module" src="/src/main.js"></script>
 </body>

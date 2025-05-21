@@ -1,10 +1,11 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
-import { Server } from 'socket.io';
+import { Server, Socket } from 'socket.io';
 import { fromIni } from "@aws-sdk/credential-providers";
-import { NovaSonicBidirectionalStreamClient } from './client';
+import { NovaSonicBidirectionalStreamClient, StreamSession } from './client';
 import { Buffer } from 'node:buffer';
+import { randomUUID } from 'crypto';
 
 // Configure AWS credentials
 const AWS_PROFILE_NAME = process.env.AWS_PROFILE || 'default';
@@ -50,29 +51,56 @@ setInterval(() => {
 // Serve static files from the public directory
 app.use(express.static(path.join(__dirname, '../public')));
 
+// Add this function before the io.on('connection') handler
+// const setupConversationHistory = async (session: any, socket: Socket) => {
+//     try {
+//         console.log(`Setting up conversation history for ${socket.id}`);
+        
+//         await session.setupHistoryForConversationResumtion(undefined, 
+//             "hi there i would like to extend my hotel reservation", "USER");
+//         await new Promise(resolve => setTimeout(resolve, 50));
+        
+//         await session.setupHistoryForConversationResumtion(undefined, 
+//             "Hello! I'd be happy to assist you with extending your hotel reservation. To get started, could you please provide me with your full name and the check-in date for your reservation?", "ASSISTANT");
+//         await new Promise(resolve => setTimeout(resolve, 50));
+        
+//         await session.setupHistoryForConversationResumtion(undefined, 
+//             "My check in date was yesterday, what date was yesterday?", "USER");
+//         await new Promise(resolve => setTimeout(resolve, 50));
+
+//         console.log(`Conversation history setup completed for ${socket.id}`);
+//     } catch (error) {
+//         console.error(`Error setting up conversation history for ${socket.id}:`, error);
+//         socket.emit('error', {
+//             message: 'Error setting up conversation history',
+//             details: error instanceof Error ? error.message : String(error)
+//         });
+//     }
+// };
+
 // Socket.IO connection handler
 io.on('connection', (socket) => {
     console.log('New client connected:', socket.id);
 
     // Create a unique session ID for this client
-    const sessionId = socket.id;
+    let currentSessionId = socket.id; // Track the current session ID for this socket
     
     // Track whether this session has been initialized
     let sessionInitialized = false;
+    let session: StreamSession;  // Add proper type
 
     try {
         // Create session with the new API
         console.log(`Creating session for ${socket.id}...`);
-        const session = bedrockClient.createStreamSession(sessionId);
+        session = bedrockClient.createStreamSession(currentSessionId);
+        
+        // Emit the initial session ID
+        socket.emit('sessionId', { sessionId: currentSessionId });
         
         console.log(`Initiating session for ${socket.id}...`);
-        bedrockClient.initiateSession(sessionId)
-            .then(() => {
-                console.log(`Session ${socket.id} initialized successfully`);
-            })
+        bedrockClient.initiateSession(currentSessionId)
             .catch(error => {
                 console.error(`Error initializing session ${socket.id}:`, error);
-                // Send detailed error to client
                 socket.emit('error', {
                     message: 'Session initialization error',
                     details: error instanceof Error ? error.message : String(error)
@@ -85,57 +113,55 @@ io.on('connection', (socket) => {
         }, 60000);
         
         // Set up event handlers
-        session.onEvent('contentStart', (data) => {
-            console.log('contentStart:', data);
-            socket.emit('contentStart', data);
-        });
+        const setupSessionEventHandlers = (sessionObj: StreamSession) => {
+            sessionObj.onEvent('contentStart', (data) => {
+                console.log('contentStart:', data);
+                socket.emit('contentStart', data);
+            });
 
-        session.onEvent('textOutput', (data) => {
-            console.log('Text output:', data);
-            socket.emit('textOutput', data);
-        });
+            sessionObj.onEvent('textOutput', (data) => {
+                console.log('Text output:', data);
+                socket.emit('textOutput', data);
+            });
 
-        session.onEvent('audioOutput', (data) => {
-            //console.log('Audio output received, sending to client');
-            socket.emit('audioOutput', data);
-        });
+            sessionObj.onEvent('audioOutput', (data) => {
+                socket.emit('audioOutput', data);
+            });
 
-        session.onEvent('error', (data) => {
-            console.error('Error in session:', data);
-            socket.emit('error', data);
-        });
+            sessionObj.onEvent('error', (data) => {
+                console.error('Error in session:', data);
+                socket.emit('error', data);
+            });
 
-        session.onEvent('toolUse', (data) => {
-            console.log('Tool use detected:', data.toolName);
-            socket.emit('toolUse', data);
-        });
+            sessionObj.onEvent('toolUse', (data) => {
+                console.log('Tool use detected:', data.toolName);
+                socket.emit('toolUse', data);
+            });
 
-        session.onEvent('toolResult', (data) => {
-            console.log('Tool result received');
-            socket.emit('toolResult', data);
-        });
+            sessionObj.onEvent('toolResult', (data) => {
+                console.log('Tool result received');
+                socket.emit('toolResult', data);
+            });
 
-        session.onEvent('contentEnd', (data) => {
-            console.log('Content end received', data);
-            socket.emit('contentEnd', data);
-        });
+            sessionObj.onEvent('contentEnd', (data) => {
+                console.log('Content end received', data);
+                socket.emit('contentEnd', data);
+            });
 
-        session.onEvent('streamComplete', () => {
-            console.log('Stream completed for client:', socket.id);
-            socket.emit('streamComplete');
-        });
+            sessionObj.onEvent('streamComplete', () => {
+                console.log('Stream completed for client:', socket.id);
+                socket.emit('streamComplete');
+            });
+        };
+        setupSessionEventHandlers(session);
 
         // Simplified audioInput handler without rate limiting
         socket.on('audioInput', async (audioData) => {
             try {
-                // Convert base64 string to Buffer
                 const audioBuffer = typeof audioData === 'string'
                     ? Buffer.from(audioData, 'base64')
                     : Buffer.from(audioData);
-
-                // Stream the audio
                 await session.streamAudio(audioBuffer);
-
             } catch (error) {
                 console.error('Error processing audio:', error);
                 socket.emit('error', {
@@ -145,25 +171,17 @@ io.on('connection', (socket) => {
             }
         });
 
-        // Generate a unique connection timestamp to ensure unique prompts
-        const connectionTimestamp = Date.now().toString();
-
         socket.on('promptStart', async () => {
             try {
                 console.log(`Prompt start received for ${socket.id}`);
-                
-                // If session already initialized, destroy existing events first
                 if (sessionInitialized) {
                     try {
-                        // Force end any existing sequences
                         await session.endAudioContent().catch(e => console.log('No audio to end'));
                         await session.endPrompt().catch(e => console.log('No prompt to end'));
                     } catch (e) {
                         console.log(`Error ending previous sequences: ${e}`);
                     }
                 }
-                
-                // Using the default implementation without custom ID
                 await session.setupPromptStart();
                 console.log(`Prompt start completed for ${socket.id}`);
             } catch (error) {
@@ -171,7 +189,6 @@ io.on('connection', (socket) => {
                 const errorDetails = error instanceof Error ? 
                     { message: error.message, stack: error.stack } : 
                     String(error);
-                
                 socket.emit('error', {
                     message: 'Error processing prompt start',
                     details: JSON.stringify(errorDetails)
@@ -182,8 +199,6 @@ io.on('connection', (socket) => {
         socket.on('systemPrompt', async (data) => {
             try {
                 console.log(`System prompt received for ${socket.id}`);
-                
-                // Using the default implementation
                 await session.setupSystemPrompt(undefined, data);
                 console.log(`System prompt completed for ${socket.id}`);
             } catch (error) {
@@ -191,7 +206,6 @@ io.on('connection', (socket) => {
                 const errorDetails = error instanceof Error ? 
                     { message: error.message, stack: error.stack } : 
                     String(error);
-                
                 socket.emit('error', {
                     message: 'Error processing system prompt',
                     details: JSON.stringify(errorDetails)
@@ -199,43 +213,34 @@ io.on('connection', (socket) => {
             }
         });
 
-        // Here we are sending the conversation history to resume the conversation
-        // This set of events need to be sent after system prompt before audio stream starts
-        socket.on('conversationResumption', async () => {
+        socket.on('conversationResumption', async (conversationHistory) => {
             try {
-                console.log(`Resume conversation received for ${socket.id}`);
-                
-                // Add smaller delays between history entries (reduced from 100ms to 50ms)
-                await session.setupHistoryForConversationResumtion(undefined, 
-                    "hi there i would like to update my hotel reservation", "USER");
-                await new Promise(resolve => setTimeout(resolve, 50));
-                
-                await session.setupHistoryForConversationResumtion(undefined, 
-                    "Hello! I'd be happy to assist you with updating your hotel reservation. To get started, could you please provide me with your full name and the check-in date for your reservation?", "ASSISTANT");
-                await new Promise(resolve => setTimeout(resolve, 50));
-                
-                await session.setupHistoryForConversationResumtion(undefined, 
-                    "yeah so my name is don smith", "USER");
-                await new Promise(resolve => setTimeout(resolve, 50));
-                
-                await session.setupHistoryForConversationResumtion(undefined, 
-                    "Thank you, Don. Now, could you please provide me with the check-in date for your reservation?", "ASSISTANT");
-                await new Promise(resolve => setTimeout(resolve, 50));
-                
-                await session.setupHistoryForConversationResumtion(undefined, 
-                    "yes so um let me check just a second", "USER");
-                await new Promise(resolve => setTimeout(resolve, 50));
-                
-                await session.setupHistoryForConversationResumtion(undefined, 
-                    "Take your time, Don. I'll be here when you're ready.", "ASSISTANT");
-
+                console.log(`Resume conversation received for ${socket.id}`, conversationHistory);
+                if (conversationHistory && conversationHistory.length > 0) {
+                    for (const message of conversationHistory) {
+                        await session.setupHistoryForConversationResumtion(
+                            undefined,
+                            message.message,
+                            message.role
+                        );
+                    }
+                } else {
+                    await session.setupHistoryForConversationResumtion(undefined, 
+                        "hi there i would like to extend my hotel reservation", "USER");
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    await session.setupHistoryForConversationResumtion(undefined, 
+                        "Hello! I'd be happy to assist you with extending your hotel reservation. To get started, could you please provide me with your full name and the check-in date for your reservation?", "ASSISTANT");
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    await session.setupHistoryForConversationResumtion(undefined, 
+                        "My name is Jane marry", "USER");
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                }
                 console.log(`Resume conversation completed for ${socket.id}`);
             } catch (error) {
                 console.error(`Error processing conversation resumption for ${socket.id}:`, error);
                 const errorDetails = error instanceof Error ? 
                     { message: error.message, stack: error.stack } : 
                     String(error);
-                
                 socket.emit('error', {
                     message: 'Error processing conversation resumption',
                     details: JSON.stringify(errorDetails)
@@ -246,22 +251,49 @@ io.on('connection', (socket) => {
         socket.on('audioStart', async (data) => {
             try {
                 console.log(`Audio start received for ${socket.id}`);
-                
                 await session.setupStartAudio();
-                
-                // Mark session as initialized only after full setup
                 sessionInitialized = true;
-                
                 console.log(`Audio start completed for ${socket.id}`);
             } catch (error) {
                 console.error(`Error processing audio start for ${socket.id}:`, error);
                 const errorDetails = error instanceof Error ? 
                     { message: error.message, stack: error.stack } : 
                     String(error);
-                
                 socket.emit('error', {
                     message: 'Error processing audio start',
                     details: JSON.stringify(errorDetails)
+                });
+            }
+        });
+
+        socket.on('reinitializeSession', async () => {
+            try {
+                console.log(`Reinitializing session for ${socket.id}`);
+                if (sessionInitialized) {
+                    try {
+                        await session.endAudioContent().catch(e => console.log('No audio to end'));
+                        await session.endPrompt().catch(e => console.log('No prompt to end'));
+                        await session.close();
+                    } catch (e) {
+                        console.log(`Error ending previous sequences: ${e}`);
+                    }
+                }
+                const newSessionId = randomUUID();
+                console.log(`Creating new session with ID: ${newSessionId}`);
+                session = bedrockClient.createStreamSession(newSessionId);
+                currentSessionId = newSessionId;
+                sessionInitialized = false;
+                setupSessionEventHandlers(session);
+
+                bedrockClient.initiateSession(newSessionId);
+                // Emit the new session ID
+                socket.emit('sessionId', { sessionId: newSessionId });
+                socket.emit('sessionReinitialized', { newSessionId });
+            } catch (error) {
+                console.error(`Error reinitializing session for ${socket.id}:`, error);
+                socket.emit('error', {
+                    message: 'Error reinitializing session',
+                    details: error instanceof Error ? error.message : String(error)
                 });
             }
         });
@@ -290,7 +322,7 @@ io.on('connection', (socket) => {
         socket.on('disconnect', async () => {
             console.log('Client disconnected:', socket.id);
 
-            if (bedrockClient.isSessionActive(sessionId)) {
+            if (bedrockClient.isSessionActive(currentSessionId)) {
                 try {
                     console.log(`Beginning cleanup for disconnected session: ${socket.id}`);
 
@@ -318,14 +350,14 @@ io.on('connection', (socket) => {
                             } catch (innerError) {
                                 console.error(`Error in session cleanup steps for ${socket.id}:`, innerError);
                                 // Force close as a fallback
-                                bedrockClient.forceCloseSession(sessionId);
-                                console.log(`Force closed session: ${sessionId} after cleanup error`);
+                                bedrockClient.forceCloseSession(currentSessionId);
+                                console.log(`Force closed session: ${currentSessionId} after cleanup error`);
                             }
                         })(),
                         new Promise((_, reject) =>
                             setTimeout(() => {
                                 console.log(`Session cleanup timeout for ${socket.id}, forcing close`);
-                                bedrockClient.forceCloseSession(sessionId);
+                                bedrockClient.forceCloseSession(currentSessionId);
                                 reject(new Error('Session cleanup timeout'));
                             }, 2000)
                         )
@@ -340,10 +372,10 @@ io.on('connection', (socket) => {
                 } catch (error) {
                     console.error(`Outer error cleaning up session: ${socket.id}`, error);
                     try {
-                        bedrockClient.forceCloseSession(sessionId);
-                        console.log(`Force closed session after outer error: ${sessionId}`);
+                        bedrockClient.forceCloseSession(currentSessionId);
+                        console.log(`Force closed session after outer error: ${currentSessionId}`);
                     } catch (e) {
-                        console.error(`Failed even force close for session: ${sessionId}`, e);
+                        console.error(`Failed even force close for session: ${currentSessionId}`, e);
                     }
                 }
             } else {

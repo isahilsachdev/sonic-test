@@ -455,3 +455,91 @@ button:disabled,
     padding: 0.5rem;
   }
 }
+
+#session-info {
+    background-color: #f5f5f5;
+    padding: 10px;
+    margin: 10px 0;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+#session-id, #session-status {
+    margin: 5px 0;
+}
+
+#current-session-id {
+    font-weight: bold;
+    color: #2196F3;
+}
+
+#session-status-text {
+    font-weight: bold;
+}
+
+#session-status-text:not(:empty) {
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+#session-status-text:contains("Active") {
+    background-color: #4CAF50;
+    color: white;
+}
+
+#session-status-text:contains("Reinitialized") {
+    background-color: #FF9800;
+    color: white;
+}
+
+#session-status-text:contains("Error") {
+    background-color: #f44336;
+    color: white;
+}
+
+#session-status-text:contains("Disconnected") {
+    background-color: #9e9e9e;
+    color: white;
+}
+
+#session-status-text:contains("Initializing") {
+    background-color: #2196F3;
+    color: white;
+}
+
+.session-info {
+    background-color: #f5f5f5;
+    padding: 10px;
+    margin: 10px 0;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.session-info div {
+    margin: 5px 0;
+}
+
+#session-id {
+    font-weight: bold;
+    color: #2196F3;
+}
+
+#status {
+    font-weight: bold;
+}
+
+#status.connected {
+    color: #4CAF50;
+}
+
+#status.disconnected {
+    color: #F44336;
+}
+
+#status.connecting {
+    color: #FF9800;
+}
+
+#status.error {
+    color: #F44336;
+}
