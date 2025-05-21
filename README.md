@@ -105,10 +105,7 @@ socket.on('conversationResumption', async () => {
 
         await session.setupHistoryForConversationResumtion(undefined, "hi there i would like to cancel my hotel reservation", "USER");
         await session.setupHistoryForConversationResumtion(undefined, "Hello! I'd be happy to assist you with cancelling your hotel reservation. To get started, could you please provide me with your full name and the check-in date for your reservation?", "ASSISTANT");
-        await session.setupHistoryForConversationResumtion(undefined, "yeah so my name is don smith", "USER");
-        await session.setupHistoryForConversationResumtion(undefined, "Thank you, Don. Now, could you please provide me with the check-in date for your reservation?", "ASSISTANT");
-        await session.setupHistoryForConversationResumtion(undefined, "yes so um let me check just a second", "USER");
-        await session.setupHistoryForConversationResumtion(undefined, "Take your time, Don. I'll be here when you're ready.", "ASSISTANT");
+        await session.setupHistoryForConversationResumtion(undefined, "My check in date was yesterday, what date was yesterday?", "USER");
     } catch (error) {
         console.error('Error processing system prompt:', error);
         socket.emit('error', {

@@ -41,6 +41,16 @@ let role;
 const audioPlayer = new AudioPlayer();
 let sessionInitialized = false;
 
+// Track if background reinitialization is in progress
+let isBackgroundReinitializing = false;
+let newSessionId = null;
+let currentAssistantResponseComplete = false;
+let oldSessionId = null;
+let isAudioBufferEmpty = false;
+let hasStartedReinitialization = false;
+let lastReinitializationTime = 0;  // Track when we last reinitialized
+const REINITIALIZATION_COOLDOWN = 10000;  // 10 seconds cooldown
+
 // Initialize WebSocket audio
 async function initAudio() {
     try {
@@ -61,6 +71,14 @@ async function initAudio() {
         });
 
         await audioPlayer.start();
+        
+        // Add buffer empty listener
+        audioPlayer.addEventListener("onBufferEmpty", () => {
+            isAudioBufferEmpty = true;
+            if (isBackgroundReinitializing && newSessionId && currentAssistantResponseComplete) {
+                switchToNewSession();
+            }
+        });
 
         statusElement.textContent = "Microphone ready. Click Start to begin.";
         statusElement.className = "ready";
@@ -373,14 +391,13 @@ socket.on('contentStart', (data) => {
     console.log('Content start received:', data);
 
     if (data.type === 'TEXT') {
-        // Below update will be enabled when role is moved to the contentStart
         role = data.role;
         if (data.role === 'USER') {
-            // When user's text content starts, hide user thinking indicator
             hideUserThinkingIndicator();
+            // Reset reinitialization flags when user starts speaking
+            hasStartedReinitialization = false;
         }
         else if (data.role === 'ASSISTANT') {
-            // When assistant's text content starts, hide assistant thinking indicator
             hideAssistantThinkingIndicator();
             let isSpeculative = false;
             try {
@@ -398,10 +415,29 @@ socket.on('contentStart', (data) => {
             } catch (e) {
                 console.error("Error parsing additionalModelFields:", e);
             }
+
+            // Check if enough time has passed since last reinitialization
+            const now = Date.now();
+            const timeSinceLastReinit = now - lastReinitializationTime;
+            
+            // Start background reinitialization only if:
+            // 1. Not already reinitializing
+            // 2. Haven't started reinitialization for this response
+            // 3. Enough time has passed since last reinitialization
+            if (!isBackgroundReinitializing && !hasStartedReinitialization && timeSinceLastReinit >= REINITIALIZATION_COOLDOWN) {
+                console.log(`Starting background reinitialization (${timeSinceLastReinit}ms since last reinit)`);
+                currentAssistantResponseComplete = false;
+                isAudioBufferEmpty = false;
+                oldSessionId = sessionIdElement.textContent;
+                hasStartedReinitialization = true;
+                lastReinitializationTime = now;
+                startBackgroundReinitialization();
+            } else {
+                console.log(`Skipping reinitialization: inProgress=${isBackgroundReinitializing}, hasStarted=${hasStartedReinitialization}, timeSinceLast=${timeSinceLastReinit}ms`);
+            }
         }
     }
     else if (data.type === 'AUDIO') {
-        // When audio content starts, we may need to show user thinking indicator
         if (isStreaming) {
             showUserThinkingIndicator();
         }
@@ -443,6 +479,7 @@ socket.on('audioOutput', (data) => {
         try {
             const audioData = base64ToFloat32Array(data.content);
             audioPlayer.playAudio(audioData);
+            isAudioBufferEmpty = false;
         } catch (error) {
             console.error('Error processing audio data:', error);
         }
@@ -455,16 +492,22 @@ socket.on('contentEnd', (data) => {
 
     if (data.type === 'TEXT') {
         if (role === 'USER') {
-            // When user's text content ends, make sure assistant thinking is shown
             hideUserThinkingIndicator();
             showAssistantThinkingIndicator();
         }
         else if (role === 'ASSISTANT') {
-            // When assistant's text content ends, prepare for user input in next turn
             hideAssistantThinkingIndicator();
+            
+            // Mark current assistant response as complete
+            currentAssistantResponseComplete = true;
+            
+            // If we have a new session ready and the current response is complete, prepare for switch
+            if (isBackgroundReinitializing && newSessionId && currentAssistantResponseComplete) {
+                // Wait for audio buffer to be empty before switching
+                checkAudioBufferAndSwitch();
+            }
         }
 
-        // Handle stop reasons
         if (data.stopReason && data.stopReason.toUpperCase() === 'END_TURN') {
             chatHistoryManager.endTurn();
         } else if (data.stopReason && data.stopReason.toUpperCase() === 'INTERRUPTED') {
@@ -473,7 +516,6 @@ socket.on('contentEnd', (data) => {
         }
     }
     else if (data.type === 'AUDIO') {
-        // When audio content ends, we may need to show user thinking indicator
         if (isStreaming) {
             showUserThinkingIndicator();
         }
@@ -591,7 +633,105 @@ socket.on('error', (error) => {
     hideAssistantThinkingIndicator();
 });
 
-// Reinitialize the session with Bedrock and track time
+// Check audio buffer and switch sessions if empty
+function checkAudioBufferAndSwitch() {
+    if (isAudioBufferEmpty) {
+        switchToNewSession();
+    } else {
+        // Check again after a short delay
+        setTimeout(checkAudioBufferAndSwitch, 100);
+    }
+}
+
+// Start background reinitialization
+async function startBackgroundReinitialization() {
+    if (isBackgroundReinitializing) {
+        console.log("Background reinitialization already in progress, skipping");
+        return;
+    }
+    
+    console.log("Starting background reinitialization");
+    isBackgroundReinitializing = true;
+    newSessionId = null;
+
+    try {
+        // Request background session reinitialization with a different event name
+        console.log("Requesting background session reinitialization");
+        socket.emit('backgroundReinitializeSession');
+        
+        // Wait for reinitialization to complete
+        await new Promise((resolve) => {
+            socket.once('backgroundSessionReinitialized', (data) => {
+                console.log("New background session created with ID:", data.newSessionId);
+                newSessionId = data.newSessionId;
+                resolve();
+            });
+        });
+        
+        // Wait a moment for the server to set up the new session
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Initialize the new session with background-specific events
+        console.log("Initializing new background session");
+        socket.emit('backgroundPromptStart');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        socket.emit('backgroundSystemPrompt');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        socket.emit('backgroundConversationResumption', chat.history);
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        socket.emit('backgroundAudioStart');
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        console.log("Background reinitialization complete");
+    } catch (error) {
+        console.error("Error during background reinitialization:", error);
+        isBackgroundReinitializing = false;
+        newSessionId = null;
+        hasStartedReinitialization = false;
+        lastReinitializationTime = 0;  // Reset the timer on error
+    }
+}
+
+// Switch to the new session
+async function switchToNewSession() {
+    if (!newSessionId || !currentAssistantResponseComplete) {
+        console.log("Cannot switch sessions - newSessionId:", newSessionId, "currentAssistantResponseComplete:", currentAssistantResponseComplete);
+        return;
+    }
+    
+    console.log("Switching to new background session:", newSessionId);
+    
+    try {
+        // Update session ID display
+        sessionIdElement.textContent = newSessionId;
+        
+        // Reset state
+        isBackgroundReinitializing = false;
+        newSessionId = null;
+        currentAssistantResponseComplete = false;
+        oldSessionId = null;
+        isAudioBufferEmpty = false;
+        hasStartedReinitialization = false;
+        
+        // Start streaming with new session
+        if (!isStreaming) {
+            await startStreaming();
+        }
+    } catch (error) {
+        console.error("Error switching to new background session:", error);
+        isBackgroundReinitializing = false;
+        newSessionId = null;
+        currentAssistantResponseComplete = false;
+        oldSessionId = null;
+        isAudioBufferEmpty = false;
+        hasStartedReinitialization = false;
+        lastReinitializationTime = 0;  // Reset the timer on error
+    }
+}
+
 async function reinitializeSession() {
     if (isStreaming) {
         stopStreaming();
@@ -698,4 +838,5 @@ stopButton.addEventListener('click', stopStreaming);
 reinitButton.addEventListener('click', reinitializeSession);
 
 // Initialize the app when the page loads
+document.addEventListener('DOMContentLoaded', initAudio);
 document.addEventListener('DOMContentLoaded', initAudio);

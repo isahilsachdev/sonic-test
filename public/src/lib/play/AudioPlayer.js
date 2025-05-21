@@ -4,13 +4,19 @@ const AudioPlayerWorkletUrl = new URL('./AudioPlayerProcessor.worklet.js', impor
 export class AudioPlayer {
     constructor() {
         this.onAudioPlayedListeners = [];
+        this.onBufferEmptyListeners = [];
         this.initialized = false;
+        this.lastAudioTime = 0;
+        this.bufferEmptyCheckInterval = null;
     }
 
     addEventListener(event, callback) {
         switch (event) {
             case "onAudioPlayed":
                 this.onAudioPlayedListeners.push(callback);
+                break;
+            case "onBufferEmpty":
+                this.onBufferEmptyListeners.push(callback);
                 break;
             default:
                 console.error("Listener registered for event type: " + JSON.stringify(event) + " which is not supported");
@@ -83,6 +89,11 @@ export class AudioPlayer {
     }
 
     stop() {
+        if (this.bufferEmptyCheckInterval) {
+            clearInterval(this.bufferEmptyCheckInterval);
+            this.bufferEmptyCheckInterval = null;
+        }
+
         if (ObjectExt.exists(this.audioContext)) {
             this.audioContext.close();
         }
@@ -129,10 +140,32 @@ export class AudioPlayer {
             console.error("The audio player is not initialized. Call init() before attempting to play audio.");
             return;
         }
+        this.lastAudioTime = Date.now();
         this.workletNode.port.postMessage({
             type: "audio",
             audioData: samples,
         });
+
+        // Start checking for buffer empty if not already checking
+        if (!this.bufferEmptyCheckInterval) {
+            this.startBufferEmptyCheck();
+        }
+    }
+
+    startBufferEmptyCheck() {
+        if (this.bufferEmptyCheckInterval) {
+            clearInterval(this.bufferEmptyCheckInterval);
+        }
+
+        this.bufferEmptyCheckInterval = setInterval(() => {
+            const now = Date.now();
+            // If no audio has been played for 100ms, consider buffer empty
+            if (now - this.lastAudioTime > 100) {
+                this.onBufferEmptyListeners.forEach(listener => listener());
+                clearInterval(this.bufferEmptyCheckInterval);
+                this.bufferEmptyCheckInterval = null;
+            }
+        }, 50); // Check every 50ms
     }
 
     getSamples() {

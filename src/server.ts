@@ -6,6 +6,7 @@ import { fromIni } from "@aws-sdk/credential-providers";
 import { NovaSonicBidirectionalStreamClient, StreamSession } from './client';
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'crypto';
+import { DefaultTextConfiguration } from './consts';
 
 // Configure AWS credentials
 const AWS_PROFILE_NAME = process.env.AWS_PROFILE || 'default';
@@ -25,6 +26,9 @@ const bedrockClient = new NovaSonicBidirectionalStreamClient({
         credentials: fromIni({ profile: AWS_PROFILE_NAME })
     }
 });
+
+// Map to store all active sessions
+const sessions = new Map<string, StreamSession>();
 
 // Periodically check for and close inactive sessions (every minute)
 // Sessions with no activity for over 5 minutes will be force closed
@@ -380,6 +384,143 @@ io.on('connection', (socket) => {
                 }
             } else {
                 console.log(`No active session to clean up for ${socket.id}`);
+            }
+        });
+
+        // Handle background session reinitialization
+        socket.on('backgroundReinitializeSession', async () => {
+            try {
+                console.log("Background reinitialization requested");
+                
+                // Generate new session ID
+                const newSessionId = randomUUID();
+                
+                // Create new session
+                const newSession = bedrockClient.createStreamSession(newSessionId);
+                
+                // Set up event handlers for the new session
+                newSession.onEvent('contentStart', (data) => {
+                    socket.emit('contentStart', data);
+                });
+                
+                newSession.onEvent('textOutput', (data) => {
+                    socket.emit('textOutput', data);
+                });
+                
+                newSession.onEvent('audioOutput', (data) => {
+                    socket.emit('audioOutput', data);
+                });
+                
+                newSession.onEvent('contentEnd', (data) => {
+                    socket.emit('contentEnd', data);
+                });
+                
+                newSession.onEvent('error', (error) => {
+                    console.error("Background session error:", error);
+                    socket.emit('error', error);
+                });
+                
+                // Emit the new session ID
+                socket.emit('backgroundSessionReinitialized', { newSessionId });
+                
+                // Store the new session
+                sessions.set(newSessionId, newSession);
+                
+                console.log(`Background session ${newSessionId} created`);
+            } catch (error) {
+                console.error("Error in background reinitialization:", error);
+                socket.emit('error', error);
+            }
+        });
+
+        // Handle background prompt start
+        socket.on('backgroundPromptStart', async () => {
+            try {
+                const sessionId = Array.from(sessions.keys()).pop(); // Get the most recently created session
+                if (!sessionId) {
+                    throw new Error("No background session found");
+                }
+                
+                const session = sessions.get(sessionId);
+                if (!session) {
+                    throw new Error(`Background session ${sessionId} not found`);
+                }
+                
+                await session.setupPromptStart();
+                console.log(`Background prompt start for session ${sessionId}`);
+            } catch (error) {
+                console.error("Error in background prompt start:", error);
+                socket.emit('error', error);
+            }
+        });
+
+        // Handle background system prompt
+        socket.on('backgroundSystemPrompt', async () => {
+            try {
+                const sessionId = Array.from(sessions.keys()).pop();
+                if (!sessionId) {
+                    throw new Error("No background session found");
+                }
+                
+                const session = sessions.get(sessionId);
+                if (!session) {
+                    throw new Error(`Background session ${sessionId} not found`);
+                }
+                
+                await session.setupSystemPrompt();
+                console.log(`Background system prompt for session ${sessionId}`);
+            } catch (error) {
+                console.error("Error in background system prompt:", error);
+                socket.emit('error', error);
+            }
+        });
+
+        // Handle background conversation resumption
+        socket.on('backgroundConversationResumption', async (history) => {
+            try {
+                const sessionId = Array.from(sessions.keys()).pop();
+                if (!sessionId) {
+                    throw new Error("No background session found");
+                }
+                
+                const session = sessions.get(sessionId);
+                if (!session) {
+                    throw new Error(`Background session ${sessionId} not found`);
+                }
+                
+                // Send each message in the history
+                for (const message of history) {
+                    await session.setupHistoryForConversationResumtion(
+                        DefaultTextConfiguration,
+                        message.message,
+                        message.role
+                    );
+                }
+                console.log(`Background conversation history sent for session ${sessionId}`);
+            } catch (error) {
+                console.error("Error in background conversation resumption:", error);
+                socket.emit('error', error);
+            }
+        });
+
+        // Handle background audio start
+        socket.on('backgroundAudioStart', async () => {
+            try {
+                const sessionId = Array.from(sessions.keys()).pop();
+                if (!sessionId) {
+                    throw new Error("No background session found");
+                }
+                
+                const session = sessions.get(sessionId);
+                if (!session) {
+                    throw new Error(`Background session ${sessionId} not found`);
+                }
+                
+                await session.setupStartAudio();
+                console.log(`Background audio start for session ${sessionId}`);
+            } catch (error) {
+                console.error("Error in background audio start:", error);
+                socket.emit('error', error);
             }
         });
 
